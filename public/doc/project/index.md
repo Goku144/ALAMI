@@ -6,7 +6,8 @@
 This manual explains the DL runtime from the top of the hierarchy down to each public class and function.
 For the final `remise`, start with the [Explanatory Submission Plan](submission_plan.md);
 it maps the same project to the Machine Learning and Practical IA / Deep
-Learning grading criteria.
+Learning grading criteria. For a read-aloud conceptual explanation, use the
+[Project Explanation Book](explanation_book.md).
 
 DL is organized as a small CUDA/C++ neural-network runtime plus an application
 layer that proves the runtime against a Python machine-learning baseline. It is
@@ -50,9 +51,11 @@ APP/
 | 8 | [Dependencies](dependencies.md) | Required CUDA, Python, and dataset dependencies. |
 | 9 | [Proof And Video](proof_video.md) | How to present and verify the project result. |
 | 10 | [Submission Plan](submission_plan.md) | Grading-oriented guide for the final report, video, and defense. |
-| 11 | [Usage](usage.md) | Minimal practical usage recipe. |
-| 12 | [Full Overview](overview.md) | Long-form narrative overview. |
-| 13 | [Conclusion](conclusion.md) | Mathematical and conceptual interpretation of the final result. |
+| 11 | [Explanation Book](explanation_book.md) | Read-aloud conceptual and mathematical explanation of the full AI project. |
+| 12 | [Final Report](final_report.md) | Formal report source used to generate `final_report.pdf`. |
+| 13 | [Usage](usage.md) | Minimal practical usage recipe. |
+| 14 | [Full Overview](overview.md) | Long-form narrative overview. |
+| 15 | [Conclusion](conclusion.md) | Mathematical and conceptual interpretation of the final result. |
 
 ## Most Important Rule
 
