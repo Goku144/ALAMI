@@ -85,8 +85,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--test-csv",
         type=Path,
-        default=META_DIR / "test.csv",
-        help="Path to the test CSV with filepath,label columns.",
+        default=META_DIR / "train.csv",
+        help="Path to the evaluation CSV with filepath,label columns.",
     )
     parser.add_argument(
         "--model-output",

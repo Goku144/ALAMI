@@ -30,6 +30,9 @@ endif
 # Build App
 ############
 
+compare:
+	@python3 app/src/comparaison.py
+
 ml:
 	@python3 app/src/ml.py
 

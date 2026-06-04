@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,6 +11,12 @@ import numpy as np
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parents[1]
+DEFAULT_DOC_DIR = PROJECT_DIR / "public" / "checkpoints" / "doc"
+DEFAULT_DL_LOG = DEFAULT_DOC_DIR / "dl.txt"
+DEFAULT_ML_LOG = DEFAULT_DOC_DIR / "ml.txt"
+DEFAULT_REPORT = DEFAULT_DOC_DIR / "comparison_report.txt"
+DEFAULT_DL_MATRIX = DEFAULT_DOC_DIR / "dl_confusion_matrix.txt"
+DEFAULT_ML_MATRIX = DEFAULT_DOC_DIR / "ml_confusion_matrix.txt"
 DEFAULT_OUTPUT = PROJECT_DIR / "public" / "checkpoints" / "img" / "comparison.png"
 
 
@@ -24,6 +31,26 @@ class TrainingPoint:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+def run_make_target(target: str, output: Path) -> None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Running make {target} ...")
+    result = subprocess.run(
+        ["make", target],
+        cwd=PROJECT_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    output.write_text(result.stdout, encoding="utf-8")
+    print(f"Saved {target} output to: {output}")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"make {target} failed with exit code {result.returncode}")
 
 
 def parse_matrix_row(line: str) -> list[int] | None:
@@ -125,20 +152,41 @@ def macro_f1(matrix: np.ndarray) -> float:
     return float(f1.mean())
 
 
-def print_report(dl_matrix: np.ndarray, ml_matrix: np.ndarray) -> None:
-    print("Model comparison")
-    print("----------------")
-    print(f"DL accuracy : {accuracy(dl_matrix):.4f}")
-    print(f"ML accuracy : {accuracy(ml_matrix):.4f}")
-    print(f"DL macro F1 : {macro_f1(dl_matrix):.4f}")
-    print(f"ML macro F1 : {macro_f1(ml_matrix):.4f}")
-    print()
-    print("Per-class recall")
-    print("class    DL      ML      diff")
+def format_matrix(matrix: np.ndarray) -> str:
+    return "\n".join(
+        "[" + " ".join(f"{value:5d}" for value in row) + "]"
+        for row in matrix
+    )
+
+
+def build_report(dl_matrix: np.ndarray, ml_matrix: np.ndarray) -> str:
+    lines = [
+        "Model comparison",
+        "----------------",
+        f"DL accuracy : {accuracy(dl_matrix):.4f}",
+        f"ML accuracy : {accuracy(ml_matrix):.4f}",
+        f"DL macro F1 : {macro_f1(dl_matrix):.4f}",
+        f"ML macro F1 : {macro_f1(ml_matrix):.4f}",
+        "",
+        "Per-class recall",
+        "class    DL      ML      diff",
+    ]
+
     for label, dl_score, ml_score in zip(
         range(10), per_class_recall(dl_matrix), per_class_recall(ml_matrix)
     ):
-        print(f"{label:>5}  {dl_score:0.4f}  {ml_score:0.4f}  {dl_score - ml_score:+0.4f}")
+        lines.append(
+            f"{label:>5}  {dl_score:0.4f}  {ml_score:0.4f}  {dl_score - ml_score:+0.4f}"
+        )
+
+    return "\n".join(lines)
+
+
+def save_comparison_docs(dl_matrix: np.ndarray, ml_matrix: np.ndarray, report: str) -> None:
+    DEFAULT_DOC_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_DL_MATRIX.write_text(format_matrix(dl_matrix) + "\n", encoding="utf-8")
+    DEFAULT_ML_MATRIX.write_text(format_matrix(ml_matrix) + "\n", encoding="utf-8")
+    DEFAULT_REPORT.write_text(report + "\n", encoding="utf-8")
 
 
 def plot_comparison(
@@ -211,21 +259,40 @@ def plot_comparison(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare existing DL and ML confusion matrices without training a model."
+        description="Run DL/ML, save logs, and compare their confusion matrices."
     )
-    parser.add_argument("--dl-log", type=Path, required=True, help="Text log from the C++ DL run.")
-    parser.add_argument("--ml-log", type=Path, required=True, help="Text output from app/src/ml.py.")
+    parser.add_argument(
+        "--dl-log",
+        type=Path,
+        default=DEFAULT_DL_LOG,
+        help="Text log from the C++ DL run.",
+    )
+    parser.add_argument(
+        "--ml-log",
+        type=Path,
+        default=DEFAULT_ML_LOG,
+        help="Text output from app/src/ml.py.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT,
         help="PNG chart output path.",
     )
+    parser.add_argument(
+        "--no-run",
+        action="store_true",
+        help="Use existing log files instead of running make ml and make dl.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    if not args.no_run:
+        run_make_target("ml", args.ml_log)
+        run_make_target("dl", args.dl_log)
 
     dl_text = read_text(args.dl_log)
     ml_text = read_text(args.ml_log)
@@ -234,8 +301,15 @@ def main() -> None:
     ml_matrix = parse_confusion_matrix(ml_text, "Confusion matrix")
     training_points = parse_training_points(dl_text)
 
-    print_report(dl_matrix, ml_matrix)
+    report = build_report(dl_matrix, ml_matrix)
+    save_comparison_docs(dl_matrix, ml_matrix, report)
+    print(report)
     plot_comparison(dl_matrix, ml_matrix, training_points, args.output)
+    print(f"\nSaved DL log to: {args.dl_log}")
+    print(f"Saved ML log to: {args.ml_log}")
+    print(f"Saved DL matrix to: {DEFAULT_DL_MATRIX}")
+    print(f"Saved ML matrix to: {DEFAULT_ML_MATRIX}")
+    print(f"Saved comparison report to: {DEFAULT_REPORT}")
     print(f"\nSaved comparison chart to: {args.output}")
 
 
