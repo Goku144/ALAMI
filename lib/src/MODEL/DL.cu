@@ -587,6 +587,94 @@ void MODEL::DL::train(size_t iterations, float learningRate, size_t checkpointEv
 
     this->imageOffset = (offset + batch) % this->modImage;
   }
+
+#if CUDA_CPU == 1
+  size_t evalBatchMax = this->imageBatch;
+  if(evalBatchMax > this->modImage) evalBatchMax = this->modImage;
+
+  size_t outCountMax = evalBatchMax * MODEL_OUTPUT_CLASSES;
+  float *prob = (float *)malloc(outCountMax * sizeof(float));
+  float *deviceFloat = NULL;
+  if(prob == NULL || cudaMalloc(&deviceFloat, outCountMax * sizeof(float)) != cudaSuccess)
+  {
+    if(prob != NULL) free(prob);
+    CORE::logWarn(__FILE__, __LINE__, "Confusion matrix allocation failed");
+    return;
+  }
+
+  size_t confusion[MODEL_REAL_CLASSES][MODEL_REAL_CLASSES];
+  memset(confusion, 0, sizeof(confusion));
+
+  uint8_t *labels = (uint8_t *)this->Y.getCpuPtr();
+  size_t correct = 0;
+  size_t total = 0;
+
+  for(size_t offset = 0; offset < this->modImage; offset += evalBatchMax)
+  {
+    size_t batch = evalBatchMax;
+    if(offset + batch > this->modImage) batch = this->modImage - offset;
+
+    this->forward(offset, batch);
+
+    size_t outCount = batch * MODEL_OUTPUT_CLASSES;
+    int threads = 256;
+    int blocks = (int)((outCount + threads - 1) / threads);
+    halfToFloatKernel<<<blocks, threads, 0, this->workspace->getStream()>>>(deviceFloat, (const __half *)this->out.getGpuPtr(), outCount);
+    cudaStreamSynchronize(this->workspace->getStream());
+
+    if(cudaMemcpy(prob, deviceFloat, outCount * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+    {
+      CORE::logWarn(__FILE__, __LINE__, "Confusion matrix copy failed");
+      cudaFree(deviceFloat);
+      free(prob);
+      return;
+    }
+
+    for(size_t row = 0; row < batch; row++)
+    {
+      int pred = 0;
+      float best = prob[row * MODEL_OUTPUT_CLASSES];
+      for(int cls = 1; cls < MODEL_REAL_CLASSES; cls++)
+      {
+        float p = prob[row * MODEL_OUTPUT_CLASSES + cls];
+        if(p > best)
+        {
+          best = p;
+          pred = cls;
+        }
+      }
+
+      int truth = labels[offset + row];
+      if(truth >= 0 && truth < MODEL_REAL_CLASSES)
+      {
+        confusion[truth][pred]++;
+        if(pred == truth) correct++;
+        total++;
+      }
+    }
+  }
+
+  float accuracy = total == 0 ? 0.0f : (float)correct / (float)total;
+  CORE::logInfo(__FILE__, __LINE__, "CONFUSION MATRIX accuracy=%0.2f%% samples=%zu", accuracy * 100.0f, total);
+  for(int row = 0; row < MODEL_REAL_CLASSES; row++)
+  {
+    CORE::logInfo(__FILE__, __LINE__, "[%5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu]",
+      confusion[row][0],
+      confusion[row][1],
+      confusion[row][2],
+      confusion[row][3],
+      confusion[row][4],
+      confusion[row][5],
+      confusion[row][6],
+      confusion[row][7],
+      confusion[row][8],
+      confusion[row][9]);
+  }
+
+  cudaFree(deviceFloat);
+  free(prob);
+#else
+#endif
 }
 
 void MODEL::DL::estimate(const char *imagePath, const char *checkpointPath)
