@@ -19,6 +19,7 @@ static constexpr int MODEL_POOL_WINDOW = 2;
 static constexpr int MODEL_HIDDEN = 128;
 static constexpr int MODEL_OUTPUT_CLASSES = 16;
 static constexpr int MODEL_REAL_CLASSES = 10;
+static constexpr const char *MODEL_EVAL_CSV = "public/target/meta/test.csv";
 
 static void setShape(VIEW::Math& math, int d0, int d1, int d2, int d3, int rank, VIEW::DType dtype)
 {
@@ -589,6 +590,14 @@ void MODEL::DL::train(size_t iterations, float learningRate, size_t checkpointEv
   }
 
 #if CUDA_CPU == 1
+  this->file->clearErr();
+  this->file->readCsv(this->filePaths, this->Y, MODEL_EVAL_CSV);
+  this->io->bindGpu(this->Y);
+  this->io->copyHostToDevice(this->Y);
+  this->file->readImages(this->filePaths, "public/target/meta", 1);
+  this->file->copyImageToDevice();
+  this->modImage = (size_t)this->Y.getLayout().getDim(0);
+
   size_t evalBatchMax = this->imageBatch;
   if(evalBatchMax > this->modImage) evalBatchMax = this->modImage;
 
