@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         "--test-csv",
         type=Path,
         default=META_DIR / "test.csv",
-        help="Path to the test CSV with filepath,label columns.",
+        help="Path to the evaluation CSV with filepath,label columns.",
     )
     parser.add_argument(
         "--model-output",
@@ -106,30 +106,44 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    model = None
+    if args.model_output.exists():
+        print(f"Loading trained model from: {args.model_output}")
+        model = joblib.load(args.model_output)
+
     print("Loading and preparing images...")
-    x_train, y_train = load_dataset(args.train_csv)
+    if model is None:
+        x_train, y_train = load_dataset(args.train_csv)
+    else:
+        x_train = y_train = None
     x_test, y_test = load_dataset(args.test_csv)
 
-    print(f"Training samples  : {x_train.shape[0]}")
+    if x_train is not None:
+        print(f"Training samples  : {x_train.shape[0]}")
+    else:
+        print("Training samples  : skipped, loaded checkpoint")
     print(f"Test samples      : {x_test.shape[0]}")
-    print(f"Features per image: {x_train.shape[1]}")
+    print(f"Features per image: {x_test.shape[1]}")
 
-    model = RandomForestClassifier(
-        n_estimators=args.n_estimators,
-        random_state=42,
-        n_jobs=-1,
-        class_weight="balanced",
-    )
+    if model is None:
+        model = RandomForestClassifier(
+            n_estimators=args.n_estimators,
+            random_state=42,
+            n_jobs=-1,
+            class_weight="balanced",
+        )
 
-    print("\nTraining Random Forest classifier...")
-    model.fit(x_train, y_train)
+        print("\nTraining Random Forest classifier...")
+        model.fit(x_train, y_train)
+
+        args.model_output.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, args.model_output)
+        print(f"\nSaved trained model to: {args.model_output}")
+    else:
+        print("\nUsing saved Random Forest classifier.")
 
     test_predictions = model.predict(x_test)
     print_metrics("Test", y_test, test_predictions)
-
-    args.model_output.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(model, args.model_output)
-    print(f"\nSaved trained model to: {args.model_output}")
 
 
 if __name__ == "__main__":

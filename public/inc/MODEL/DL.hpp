@@ -151,7 +151,7 @@ public:
    * @param imageBatch Preferred training batch size. Passing 0 uses the model default.
    * @param csvPath Dataset CSV path containing image paths and labels.
    * */
-  DL(size_t imageBatch, const char *csvPath = "public/target/meta/test.csv");
+  DL(size_t imageBatch, const char *csvPath = "public/target/meta/train.csv");
 
   /** @brief Destroy owned handlers and release runtime resources. */
   ~DL();

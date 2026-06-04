@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 static constexpr int MODEL_CONV_FILTERS = 16;
@@ -19,6 +20,7 @@ static constexpr int MODEL_POOL_WINDOW = 2;
 static constexpr int MODEL_HIDDEN = 128;
 static constexpr int MODEL_OUTPUT_CLASSES = 16;
 static constexpr int MODEL_REAL_CLASSES = 10;
+static constexpr const char *MODEL_EVAL_CSV = "public/target/meta/test.csv";
 
 static void setShape(VIEW::Math& math, int d0, int d1, int d2, int d3, int rank, VIEW::DType dtype)
 {
@@ -36,6 +38,38 @@ static void relayout(VIEW::Math& math, int d0, int d1, int d2, int d3, int rank,
 {
   setShape(math, d0, d1, d2, d3, rank, dtype);
   math.setCount((size_t)d0 * math.getLayout().getStride(0));
+}
+
+static void shuffleCsvRows(VIEW::Math& filePaths, VIEW::Math& labels, unsigned int seed)
+{
+  int rows = filePaths.getLayout().getDim(0);
+  int cols = filePaths.getLayout().getDim(1);
+  if(rows <= 1 || cols <= 0 || filePaths.getCpuPtr() == NULL || labels.getCpuPtr() == NULL) return;
+
+  uint8_t *paths = (uint8_t *)filePaths.getCpuPtr();
+  uint8_t *ys = (uint8_t *)labels.getCpuPtr();
+  uint8_t *tmpPath = (uint8_t *)malloc((size_t)cols);
+  if(tmpPath == NULL) return;
+
+  unsigned int state = seed;
+  for(int index = rows - 1; index > 0; index--)
+  {
+    state = state * 1664525u + 1013904223u;
+    int swapIndex = (int)(state % (unsigned int)(index + 1));
+    if(swapIndex == index) continue;
+
+    uint8_t *a = paths + (size_t)index * cols;
+    uint8_t *b = paths + (size_t)swapIndex * cols;
+    memcpy(tmpPath, a, (size_t)cols);
+    memcpy(a, b, (size_t)cols);
+    memcpy(b, tmpPath, (size_t)cols);
+
+    uint8_t tmpLabel = ys[index];
+    ys[index] = ys[swapIndex];
+    ys[swapIndex] = tmpLabel;
+  }
+
+  free(tmpPath);
 }
 
 #if CUDA_CPU == 1
@@ -101,6 +135,7 @@ MODEL::DL::DL(size_t imageBatch, const char *csvPath)
   this->imageBatch = imageBatch == 0 ? CORE::MODEL_IMAGE_BATCH_DEFAULT : imageBatch;
 
   this->file->readCsv(this->filePaths, this->Y, csvPath);
+  shuffleCsvRows(this->filePaths, this->Y, 42u);
 #if CUDA_CPU == 1
   this->io->bindGpu(this->Y);
   this->io->copyHostToDevice(this->Y);
@@ -370,6 +405,65 @@ static size_t checkpointBytes(VIEW::Math& w0, VIEW::Math& b0, VIEW::Math& w1, VI
   return tensorBytes(w0) + tensorBytes(b0) + tensorBytes(w1) + tensorBytes(b1) + tensorBytes(w2) + tensorBytes(b2);
 }
 
+static bool findLatestCheckpoint(const char *prefix, char *path, size_t pathSize, size_t& iteration)
+{
+  if(prefix == NULL || path == NULL || pathSize == 0) return false;
+
+  const char *slash = strrchr(prefix, '/');
+  char dirPath[512];
+  const char *baseName = prefix;
+  if(slash == NULL)
+  {
+    snprintf(dirPath, sizeof(dirPath), ".");
+  }
+  else
+  {
+    size_t dirLen = (size_t)(slash - prefix);
+    if(dirLen >= sizeof(dirPath)) return false;
+    memcpy(dirPath, prefix, dirLen);
+    dirPath[dirLen] = '\0';
+    baseName = slash + 1;
+  }
+
+  char marker[256];
+  int markerLen = snprintf(marker, sizeof(marker), "%s_iter_", baseName);
+  if(markerLen <= 0 || (size_t)markerLen >= sizeof(marker)) return false;
+
+  DIR *dir = opendir(dirPath);
+  if(dir == NULL) return false;
+
+  bool found = false;
+  size_t bestIteration = 0;
+  char bestPath[512];
+  bestPath[0] = '\0';
+
+  struct dirent *entry = NULL;
+  while((entry = readdir(dir)) != NULL)
+  {
+    if(strncmp(entry->d_name, marker, (size_t)markerLen) != 0) continue;
+
+    char *end = NULL;
+    unsigned long value = strtoul(entry->d_name + markerLen, &end, 10);
+    if(end == entry->d_name + markerLen || strcmp(end, ".bin") != 0) continue;
+
+    if(!found || (size_t)value > bestIteration)
+    {
+      int written = snprintf(bestPath, sizeof(bestPath), "%s/%s", dirPath, entry->d_name);
+      if(written <= 0 || (size_t)written >= sizeof(bestPath)) continue;
+      bestIteration = (size_t)value;
+      found = true;
+    }
+  }
+
+  closedir(dir);
+  if(!found) return false;
+
+  if(strlen(bestPath) + 1 > pathSize) return false;
+  memcpy(path, bestPath, strlen(bestPath) + 1);
+  iteration = bestIteration;
+  return true;
+}
+
 
 static bool restoreTensor(HANDLER::IO *io, VIEW::Math& checkpoint, size_t& offset, VIEW::Math& math)
 {
@@ -498,7 +592,23 @@ void MODEL::DL::train(size_t iterations, float learningRate, size_t checkpointEv
 {
   if(this->modImage == 0 || iterations == 0) return;
 
-  for(size_t iter = 0; iter < iterations; iter++)
+  size_t startIteration = 0;
+  char latestCheckpoint[512];
+  if(findLatestCheckpoint(checkpointPrefix, latestCheckpoint, sizeof(latestCheckpoint), startIteration))
+  {
+    if(this->loadCheckpoint(latestCheckpoint))
+    {
+      if(startIteration > iterations) startIteration = iterations;
+      this->imageOffset = (startIteration * this->imageBatch) % this->modImage;
+      CORE::logInfo(__FILE__, __LINE__, "Using checkpoint for benchmark/resume: %s (iteration=%zu)", latestCheckpoint, startIteration);
+    }
+    else
+    {
+      startIteration = 0;
+    }
+  }
+
+  for(size_t iter = startIteration; iter < iterations; iter++)
   {
     size_t batch = this->imageBatch;
     if(batch > this->modImage) batch = this->modImage;
@@ -587,6 +697,102 @@ void MODEL::DL::train(size_t iterations, float learningRate, size_t checkpointEv
 
     this->imageOffset = (offset + batch) % this->modImage;
   }
+
+#if CUDA_CPU == 1
+  this->file->clearErr();
+  this->file->readCsv(this->filePaths, this->Y, MODEL_EVAL_CSV);
+  this->io->bindGpu(this->Y);
+  this->io->copyHostToDevice(this->Y);
+  this->file->readImages(this->filePaths, "public/target/meta", 1);
+  this->file->copyImageToDevice();
+  this->modImage = (size_t)this->Y.getLayout().getDim(0);
+
+  size_t evalBatchMax = this->imageBatch;
+  if(evalBatchMax > this->modImage) evalBatchMax = this->modImage;
+
+  size_t outCountMax = evalBatchMax * MODEL_OUTPUT_CLASSES;
+  float *prob = (float *)malloc(outCountMax * sizeof(float));
+  float *deviceFloat = NULL;
+  if(prob == NULL || cudaMalloc(&deviceFloat, outCountMax * sizeof(float)) != cudaSuccess)
+  {
+    if(prob != NULL) free(prob);
+    CORE::logWarn(__FILE__, __LINE__, "Confusion matrix allocation failed");
+    return;
+  }
+
+  size_t confusion[MODEL_REAL_CLASSES][MODEL_REAL_CLASSES];
+  memset(confusion, 0, sizeof(confusion));
+
+  uint8_t *labels = (uint8_t *)this->Y.getCpuPtr();
+  size_t correct = 0;
+  size_t total = 0;
+
+  for(size_t offset = 0; offset < this->modImage; offset += evalBatchMax)
+  {
+    size_t batch = evalBatchMax;
+    if(offset + batch > this->modImage) batch = this->modImage - offset;
+
+    this->forward(offset, batch);
+
+    size_t outCount = batch * MODEL_OUTPUT_CLASSES;
+    int threads = 256;
+    int blocks = (int)((outCount + threads - 1) / threads);
+    halfToFloatKernel<<<blocks, threads, 0, this->workspace->getStream()>>>(deviceFloat, (const __half *)this->out.getGpuPtr(), outCount);
+    cudaStreamSynchronize(this->workspace->getStream());
+
+    if(cudaMemcpy(prob, deviceFloat, outCount * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess)
+    {
+      CORE::logWarn(__FILE__, __LINE__, "Confusion matrix copy failed");
+      cudaFree(deviceFloat);
+      free(prob);
+      return;
+    }
+
+    for(size_t row = 0; row < batch; row++)
+    {
+      int pred = 0;
+      float best = prob[row * MODEL_OUTPUT_CLASSES];
+      for(int cls = 1; cls < MODEL_REAL_CLASSES; cls++)
+      {
+        float p = prob[row * MODEL_OUTPUT_CLASSES + cls];
+        if(p > best)
+        {
+          best = p;
+          pred = cls;
+        }
+      }
+
+      int truth = labels[offset + row];
+      if(truth >= 0 && truth < MODEL_REAL_CLASSES)
+      {
+        confusion[truth][pred]++;
+        if(pred == truth) correct++;
+        total++;
+      }
+    }
+  }
+
+  float accuracy = total == 0 ? 0.0f : (float)correct / (float)total;
+  CORE::logInfo(__FILE__, __LINE__, "CONFUSION MATRIX accuracy=%0.2f%% samples=%zu", accuracy * 100.0f, total);
+  for(int row = 0; row < MODEL_REAL_CLASSES; row++)
+  {
+    CORE::logInfo(__FILE__, __LINE__, "[%5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu %5zu]",
+      confusion[row][0],
+      confusion[row][1],
+      confusion[row][2],
+      confusion[row][3],
+      confusion[row][4],
+      confusion[row][5],
+      confusion[row][6],
+      confusion[row][7],
+      confusion[row][8],
+      confusion[row][9]);
+  }
+
+  cudaFree(deviceFloat);
+  free(prob);
+#else
+#endif
 }
 
 void MODEL::DL::estimate(const char *imagePath, const char *checkpointPath)
