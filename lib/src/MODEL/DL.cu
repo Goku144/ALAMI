@@ -11,6 +11,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <sys/stat.h>
 
 static constexpr int MODEL_CONV_FILTERS = 16;
@@ -37,6 +38,38 @@ static void relayout(VIEW::Math& math, int d0, int d1, int d2, int d3, int rank,
 {
   setShape(math, d0, d1, d2, d3, rank, dtype);
   math.setCount((size_t)d0 * math.getLayout().getStride(0));
+}
+
+static void shuffleCsvRows(VIEW::Math& filePaths, VIEW::Math& labels, unsigned int seed)
+{
+  int rows = filePaths.getLayout().getDim(0);
+  int cols = filePaths.getLayout().getDim(1);
+  if(rows <= 1 || cols <= 0 || filePaths.getCpuPtr() == NULL || labels.getCpuPtr() == NULL) return;
+
+  uint8_t *paths = (uint8_t *)filePaths.getCpuPtr();
+  uint8_t *ys = (uint8_t *)labels.getCpuPtr();
+  uint8_t *tmpPath = (uint8_t *)malloc((size_t)cols);
+  if(tmpPath == NULL) return;
+
+  unsigned int state = seed;
+  for(int index = rows - 1; index > 0; index--)
+  {
+    state = state * 1664525u + 1013904223u;
+    int swapIndex = (int)(state % (unsigned int)(index + 1));
+    if(swapIndex == index) continue;
+
+    uint8_t *a = paths + (size_t)index * cols;
+    uint8_t *b = paths + (size_t)swapIndex * cols;
+    memcpy(tmpPath, a, (size_t)cols);
+    memcpy(a, b, (size_t)cols);
+    memcpy(b, tmpPath, (size_t)cols);
+
+    uint8_t tmpLabel = ys[index];
+    ys[index] = ys[swapIndex];
+    ys[swapIndex] = tmpLabel;
+  }
+
+  free(tmpPath);
 }
 
 #if CUDA_CPU == 1
@@ -102,6 +135,7 @@ MODEL::DL::DL(size_t imageBatch, const char *csvPath)
   this->imageBatch = imageBatch == 0 ? CORE::MODEL_IMAGE_BATCH_DEFAULT : imageBatch;
 
   this->file->readCsv(this->filePaths, this->Y, csvPath);
+  shuffleCsvRows(this->filePaths, this->Y, 42u);
 #if CUDA_CPU == 1
   this->io->bindGpu(this->Y);
   this->io->copyHostToDevice(this->Y);
@@ -371,6 +405,65 @@ static size_t checkpointBytes(VIEW::Math& w0, VIEW::Math& b0, VIEW::Math& w1, VI
   return tensorBytes(w0) + tensorBytes(b0) + tensorBytes(w1) + tensorBytes(b1) + tensorBytes(w2) + tensorBytes(b2);
 }
 
+static bool findLatestCheckpoint(const char *prefix, char *path, size_t pathSize, size_t& iteration)
+{
+  if(prefix == NULL || path == NULL || pathSize == 0) return false;
+
+  const char *slash = strrchr(prefix, '/');
+  char dirPath[512];
+  const char *baseName = prefix;
+  if(slash == NULL)
+  {
+    snprintf(dirPath, sizeof(dirPath), ".");
+  }
+  else
+  {
+    size_t dirLen = (size_t)(slash - prefix);
+    if(dirLen >= sizeof(dirPath)) return false;
+    memcpy(dirPath, prefix, dirLen);
+    dirPath[dirLen] = '\0';
+    baseName = slash + 1;
+  }
+
+  char marker[256];
+  int markerLen = snprintf(marker, sizeof(marker), "%s_iter_", baseName);
+  if(markerLen <= 0 || (size_t)markerLen >= sizeof(marker)) return false;
+
+  DIR *dir = opendir(dirPath);
+  if(dir == NULL) return false;
+
+  bool found = false;
+  size_t bestIteration = 0;
+  char bestPath[512];
+  bestPath[0] = '\0';
+
+  struct dirent *entry = NULL;
+  while((entry = readdir(dir)) != NULL)
+  {
+    if(strncmp(entry->d_name, marker, (size_t)markerLen) != 0) continue;
+
+    char *end = NULL;
+    unsigned long value = strtoul(entry->d_name + markerLen, &end, 10);
+    if(end == entry->d_name + markerLen || strcmp(end, ".bin") != 0) continue;
+
+    if(!found || (size_t)value > bestIteration)
+    {
+      int written = snprintf(bestPath, sizeof(bestPath), "%s/%s", dirPath, entry->d_name);
+      if(written <= 0 || (size_t)written >= sizeof(bestPath)) continue;
+      bestIteration = (size_t)value;
+      found = true;
+    }
+  }
+
+  closedir(dir);
+  if(!found) return false;
+
+  if(strlen(bestPath) + 1 > pathSize) return false;
+  memcpy(path, bestPath, strlen(bestPath) + 1);
+  iteration = bestIteration;
+  return true;
+}
+
 
 static bool restoreTensor(HANDLER::IO *io, VIEW::Math& checkpoint, size_t& offset, VIEW::Math& math)
 {
@@ -499,7 +592,23 @@ void MODEL::DL::train(size_t iterations, float learningRate, size_t checkpointEv
 {
   if(this->modImage == 0 || iterations == 0) return;
 
-  for(size_t iter = 0; iter < iterations; iter++)
+  size_t startIteration = 0;
+  char latestCheckpoint[512];
+  if(findLatestCheckpoint(checkpointPrefix, latestCheckpoint, sizeof(latestCheckpoint), startIteration))
+  {
+    if(this->loadCheckpoint(latestCheckpoint))
+    {
+      if(startIteration > iterations) startIteration = iterations;
+      this->imageOffset = (startIteration * this->imageBatch) % this->modImage;
+      CORE::logInfo(__FILE__, __LINE__, "Using checkpoint for benchmark/resume: %s (iteration=%zu)", latestCheckpoint, startIteration);
+    }
+    else
+    {
+      startIteration = 0;
+    }
+  }
+
+  for(size_t iter = startIteration; iter < iterations; iter++)
   {
     size_t batch = this->imageBatch;
     if(batch > this->modImage) batch = this->modImage;
