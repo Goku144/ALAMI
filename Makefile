@@ -10,7 +10,7 @@ INC := -Ipublic/inc -Ilib/src -I/usr/local/cuda-13.2/include -I/usr/local/cuda-1
 # NVCC OPTIONS 
 ###############
 
-NVCC ?= /usr/local/cuda-13.2/bin/nvcc
+NVCC ?= nvcc
 CUDA_AVAILABLE := $(if $(NVCC),1,0)
 FLAG_CUDA := -O3 -Wno-deprecated-gpu-targets -arch=sm_75 -Xcompiler -fno-exceptions -diag-suppress 550
 LIBS_CUDA := -lcudnn -lcusparse -lcusolver -lcurand -lcublasLt -lcublas -lcudart
