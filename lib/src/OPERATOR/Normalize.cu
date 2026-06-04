@@ -1,0 +1,117 @@
+#include "OPERATOR/Normalize.hpp"
+
+#if CUDA_CPU == 1
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
+#include <cuda/cmath>
+#include <cuda_runtime_api.h>
+#else
+#include <immintrin.h>
+#endif
+
+#if CUDA_CPU == 1
+static __device__ __forceinline__ unsigned int helperKernelHalf2ToU32(__half2 x)
+{
+  union
+  {
+    unsigned int u;
+    __half2 h;
+  } v;
+  v.h = x;
+  return v.u;
+}
+
+static __device__ __forceinline__ __half2 helperKernelU32ToHalf2(unsigned int x)
+{
+  union
+  {
+    unsigned int u;
+    __half2 h;
+  } v;
+  v.u = x;
+  return v.h;
+}
+
+static __device__ __forceinline__ __half2 helperKernelHalf2Norm(half2 x, float scalar)
+{
+  half2 norm_rcp = __float2half2_rn(1.0f / scalar);
+  return __hmul2(x, norm_rcp);
+}
+
+__global__ void normKernelByScalar(uint4 * __restrict__ OUT, const uint4 * __restrict__ IN, float scalar, int N8)
+{
+  int index = threadIdx.x + blockDim.x * blockIdx.x;
+  if(index >= N8) return;
+
+  float s = scalar;
+  uint4 in = IN[index];
+  uint4 out;
+  out.x = helperKernelHalf2ToU32(helperKernelHalf2Norm(helperKernelU32ToHalf2(in.x), s));
+  out.y = helperKernelHalf2ToU32(helperKernelHalf2Norm(helperKernelU32ToHalf2(in.y), s));
+  out.z = helperKernelHalf2ToU32(helperKernelHalf2Norm(helperKernelU32ToHalf2(in.z), s));
+  out.w = helperKernelHalf2ToU32(helperKernelHalf2Norm(helperKernelU32ToHalf2(in.w), s));
+  OUT[index] = out;
+}
+
+__global__ void normKernelByScalarTail(__half * __restrict__ OUT, const __half * __restrict__ IN, float scalar, int N)
+{
+  int index = threadIdx.x + blockDim.x * blockIdx.x;
+  if(index >= N) return;
+
+  float a_f = __half2float(IN[index]);
+  OUT[index] = __float2half(a_f * (1.0f / scalar));
+}
+#endif
+
+OPERATOR::Normalize::Normalize(HANDLER::Workspace& workspace)
+{
+  this->workspace = &workspace;
+}
+OPERATOR::Normalize::Normalize(HANDLER::Workspace& workspace, VIEW::Math& out, VIEW::Math& in)
+{
+  this->workspace = &workspace;
+  this->out = &out;
+  this->in = &in;
+}
+OPERATOR::Normalize::~Normalize()
+{}
+
+VIEW::Math& OPERATOR::Normalize::getInput()
+{
+  return *this->in;
+}
+VIEW::Math& OPERATOR::Normalize::getOutput()
+{
+  return *this->out;
+}
+
+void OPERATOR::Normalize::setOperand(VIEW::Math& out, VIEW::Math& in)
+{
+  this->in = &in;
+  this->out = &out;
+}
+
+void OPERATOR::Normalize::normByScalar(float scalar)
+{
+#if CUDA_CPU == 1
+  int N = this->in->getCount();
+  int N8 = N / 8;
+  int threads = N <= 256 ? 256 : N <= 512 ? 512 : 1024;
+
+  if(N8 > 0)
+  {
+    int blocks = cuda::ceil_div(N8, threads);
+    normKernelByScalar<<<blocks, threads, 0, this->workspace->getStream()>>>((uint4 *) this->out->getGpuPtr(), (uint4 *) this->in->getGpuPtr(), scalar, N8);
+  }
+
+  int tailStart = N8 * 8;
+  if(tailStart < N)
+  {
+    int tailN = N - tailStart;
+    int blocks = cuda::ceil_div(tailN, threads);
+    normKernelByScalarTail<<<blocks, threads, 0, this->workspace->getStream()>>>((__half *)this->out->getGpuPtr() + tailStart, (const __half *)this->in->getGpuPtr() + tailStart, scalar, tailN);
+  }
+#else
+
+#endif
+}
