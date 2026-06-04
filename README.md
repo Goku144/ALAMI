@@ -32,7 +32,9 @@ public/inc/HANDLER          Public HANDLER headers
 public/inc/OPERATOR         Public OPERATOR headers
 public/inc/MODEL            Public MODEL headers
 lib/src                     Implementations and CUDA kernels
-app/src/app.cu              User application / experiment entrypoint
+app/src/dl.cu               CUDA DL application / experiment entrypoint
+app/src/ml.py               Python Random Forest baseline
+app/src/comparaison.py      Comparison, logging, and chart script
 public/doc/project          Project manual
 Makefile                    Build, run, dataset, and clean targets
 ```
@@ -80,16 +82,16 @@ Build the library:
 make lib
 ```
 
-Build and run `app/src/app.cu`:
+Build and run `app/src/dl.cu`:
 
 ```bash
-make app
+make dl
 ```
 
 If `nvcc` is installed but not on `PATH`, pass it explicitly:
 
 ```bash
-make app NVCC=/usr/local/cuda/bin/nvcc
+make dl NVCC=/usr/local/cuda/bin/nvcc
 ```
 
 Clean generated build outputs:
@@ -168,5 +170,5 @@ Public headers also contain Doxygen comments for classes and functions.
 - Raw pointer IO copy overloads copy data only and should not change tensor shape.
 - Most custom F16 kernels assume element counts are multiples of 8 because they use `uint4` vectorized memory access.
 - `Conv2DRelu` currently performs convolution plus bias. It creates a ReLU descriptor but does not call cuDNN activation in `forward()`.
-- `app/src/app.cu` is user application space. It can be used for experiments or tests, but it is not a core framework layer.
+- `app/src` is user application space. It contains the CUDA DL app, the Python ML baseline, and the comparison script. These files can be used for experiments or tests, but they are not core framework layers.
 # ALAMI

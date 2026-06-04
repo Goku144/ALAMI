@@ -1,7 +1,7 @@
 # Usage
 
 > **Reading Path**  
-> Home: [Project Manual](index.md) | Previous: [MODEL](MODEL/index.md) | Next: [Full Overview](huge.md)
+> Home: [Project Manual](index.md) | Previous: [Proof And Video](proof_video.md) | Next: [Full Overview](overview.md)
 
 This is the shortest practical recipe for using the runtime.
 
@@ -103,9 +103,27 @@ CORE::errIO err = io.getErr();
 
 ## App Folder
 
-`app/src/app.cu` is user-owned application space. It can be used for experiments, examples, manual tests, or real programs. It is not a required framework layer.
+`app/src` is user-owned application space. The current files are:
+
+```text
+app/src/dl.cu
+app/src/ml.py
+app/src/comparaison.py
+```
+
+Use:
+
+```bash
+make dl
+make ml
+make compaire
+```
+
+`make compaire` is the full proof workflow: it runs both models, stores their
+logs, extracts confusion matrices, writes a report, and saves a comparison
+chart.
 
 ---
 
 > **Continue Reading**  
-> Previous: [MODEL](MODEL/index.md) | Next: [Full Overview](overview.md)
+> Previous: [Proof And Video](proof_video.md) | Next: [Full Overview](overview.md)

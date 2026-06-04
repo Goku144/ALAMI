@@ -73,6 +73,9 @@ OPERATOR
 
 MODEL
   orchestrates handlers, tensors, operators, parameters, checkpoints, and model workflows
+
+APP
+  runs experiments and turns model output into proof artifacts
 ```
 
 Operators should not allocate user tensors. They should operate on already-shaped, already-bound `VIEW::Math` objects.
@@ -160,6 +163,43 @@ Current responsibilities:
 
 Future generic layer/model APIs can be built on top of the current concrete
 `MODEL::DL` behavior.
+
+## Where APP Fits
+
+`APP` is above the runtime and model layers. It is not required by the core
+runtime, but it is required for repeatable experiments.
+
+```text
+app/src/dl.cu
+  -> calls MODEL::DL
+  -> trains or resumes CUDA checkpoint
+  -> benchmarks on test.csv
+
+app/src/ml.py
+  -> trains or loads Random Forest
+  -> benchmarks on test.csv
+
+app/src/comparaison.py
+  -> runs both paths
+  -> stores raw output
+  -> parses confusion matrices
+  -> draws comparison chart
+```
+
+This separation keeps the runtime clean. Operators do math. The model wires the
+graph. The app decides what experiment to run.
+
+## Train/Test Discipline
+
+The current proof workflow uses:
+
+```text
+train.csv for training
+test.csv for final benchmark
+```
+
+That split is important. A model can memorize training data; the test split is
+the evidence that the learned representation generalizes.
 
 ---
 

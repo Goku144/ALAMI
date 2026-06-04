@@ -19,6 +19,7 @@ pipeline:
 ```text
 CSV metadata
   -> File::readCsv
+  -> shuffle training rows
   -> labels copied to GPU
 
 image paths
@@ -39,10 +40,17 @@ forward batch
   -> Softmax
 
 training
+  -> optional checkpoint restore
   -> CrossEntropy
   -> backward operators
   -> SGD updates
   -> optional checkpoint
+
+benchmark
+  -> load test.csv
+  -> load test images
+  -> forward batches
+  -> confusion matrix
 
 estimate
   -> optional checkpoint load
@@ -67,6 +75,7 @@ Implementation-local constants in `lib/src/MODEL/DL.cu` define the network:
 | `MODEL_HIDDEN = 128` | Hidden feature count in the first linear layer. |
 | `MODEL_OUTPUT_CLASSES = 16` | Softmax output columns. |
 | `MODEL_REAL_CLASSES = 10` | Real digit classes reported to the user. |
+| `MODEL_EVAL_CSV = public/target/meta/test.csv` | Held-out benchmark CSV. |
 
 The model trains with 16 output columns even though only classes `0..9` are
 real digit classes. The extra columns are padding capacity for vectorized
@@ -91,13 +100,40 @@ real digit classes. The extra columns are padding capacity for vectorized
 ## Public Interface
 
 ```cpp
-DL(size_t imageBatch, const char *csvPath = "public/target/meta/test.csv");
+DL(size_t imageBatch, const char *csvPath = "public/target/meta/train.csv");
 ~DL();
 
 size_t getImageBatch() const;
 void train(size_t iterations, float learningRate = 0.01f, size_t checkpointEvery = 0, const char *checkpointPrefix = "public/checkpoints/dl");
 void estimate(const char *imagePath, const char *checkpointPath = NULL);
 ```
+
+## Current Training Policy
+
+The app currently uses:
+
+```cpp
+MODEL::DL dl(64);
+dl.train(60000, 0.0005f, 3000);
+```
+
+This is a refinement schedule. It works with checkpoint resume: if a matching
+`dl_iter_*.bin` checkpoint already exists, the model loads the latest checkpoint
+and continues from there instead of starting over.
+
+## Why Rows Are Shuffled
+
+The MNIST CSV files are grouped by label. Sequential mini-batch SGD should not
+learn from long class blocks such as all zeros, then all ones, then all twos.
+`MODEL::DL` shuffles path and label rows together before image loading so each
+batch is mixed while preserving the correct image-label pair.
+
+## Why The Benchmark Reloads Test Data
+
+Training uses `train.csv`. The final confusion matrix uses `test.csv`.
+
+This distinction is the core of the project proof. Training accuracy shows what
+the model can fit. Test accuracy shows what the model can generalize.
 
 ## Private Interface
 
@@ -180,6 +216,27 @@ flattening pooled feature maps before fully connected layers.
 original allocation. Correctness depends on the constructor binding buffers at
 the maximum batch size.
 
+### `static void shuffleCsvRows(VIEW::Math& filePaths, VIEW::Math& labels, unsigned int seed)`
+
+**Type:** File-local helper.
+
+**Core Meaning:** Shuffle training metadata while preserving the image-label
+relationship.
+
+**Conceptual Role:** Mini-batch SGD needs mixed classes. The MNIST CSV data is
+grouped by label, so training sequentially without shuffling teaches the model
+class blocks instead of representative batches.
+
+**Implementation Logic:** Swaps rows in `filePaths` and the corresponding
+entries in `labels` with a deterministic pseudo-random sequence.
+
+**Dependencies & Propagation:** Runs after `File::readCsv()` and before
+`File::readImages()`. Because image paths are shuffled before image loading,
+the image tensor is created in the same order as the shuffled labels.
+
+**Edge Cases/Assumptions:** The helper is deterministic by seed. It shuffles
+metadata in-place and does not allocate model tensors.
+
 ### `static __global__ void initParamKernel(__half *dst, size_t count, float scale, unsigned int seed)`
 
 **Type:** CUDA kernel.
@@ -258,6 +315,28 @@ workspace stream.
 **Implementation Logic:** Returns `math.getCount() * math.getLayout().getDType()`.
 
 **Dependencies & Propagation:** Defines checkpoint payload sizes.
+
+### `static bool findLatestCheckpoint(const char *prefix, char *path, size_t pathSize, size_t& iteration)`
+
+**Type:** File-local helper.
+
+**Core Meaning:** Find the newest `dl_iter_*.bin` checkpoint for resume or
+benchmark.
+
+**Conceptual Role:** Long CUDA training should not be disposable. This helper
+lets the model continue from the latest saved weights or benchmark from them
+without restarting.
+
+**Implementation Logic:** Splits the checkpoint prefix into directory and base
+name, scans the directory, extracts iteration numbers from filenames matching
+`<prefix>_iter_<N>.bin`, and returns the highest `N`.
+
+**Dependencies & Propagation:** Used at the start of `train()`. If a checkpoint
+is found and restored, training starts from that iteration. If the checkpoint is
+already at or beyond the requested target, the model proceeds to benchmark.
+
+**Edge Cases/Assumptions:** It only understands the current raw checkpoint
+naming format. It ignores unrelated files.
 
 **Edge Cases/Assumptions:** Uses logical count and dtype, not aligned
 `math.getBytes()`.
